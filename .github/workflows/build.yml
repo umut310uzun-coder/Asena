@@ -1,0 +1,375 @@
+name: Asena APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Projeyi olustur
+        run: |
+          npx --yes create-expo-app@latest asena --template blank-typescript --yes
+          cd asena
+          npx expo install expo-speech expo-speech-recognition expo-keep-awake expo-build-properties @react-native-async-storage/async-storage
+
+      - name: Ayarlar (app.json)
+        working-directory: asena
+        run: |
+          node -e '
+          const fs = require("fs");
+          const j = JSON.parse(fs.readFileSync("app.json", "utf8"));
+          const name = (x) => (Array.isArray(x) ? x[0] : x);
+          const mine = ["expo-speech-recognition", "expo-build-properties"];
+          j.expo.name = "Asena";
+          j.expo.slug = "asena";
+          j.expo.userInterfaceStyle = "dark";
+          j.expo.android = { ...(j.expo.android || {}), package: "com.umut.asena", permissions: ["RECORD_AUDIO"] };
+          j.expo.plugins = [
+            ...(j.expo.plugins || []).filter((x) => !mine.includes(name(x))),
+            ["expo-speech-recognition", {
+              microphonePermission: "Asena seni duymak icin mikrofona erismek istiyor.",
+              speechRecognitionPermission: "Asena konusmani yaziya cevirmek istiyor.",
+              androidSpeechServicePackages: ["com.google.android.googlequicksearchbox"]
+            }],
+            ["expo-build-properties", { android: { usesCleartextTraffic: true } }]
+          ];
+          fs.writeFileSync("app.json", JSON.stringify(j, null, 2));
+          '
+
+      - name: Dosya src/core/providers.ts
+        working-directory: asena
+        run: |
+          mkdir -p "$(dirname src/core/providers.ts)"
+          cat > src/core/providers.ts <<'EOF'
+          export type ApiType = "openai" | "anthropic" | "gemini";
+
+          export type Provider = {
+            id: string;
+            name: string;
+            type: ApiType;
+            baseUrl: string;
+            apiKey: string;
+            model: string;
+            enabled: boolean;
+            needsKey: boolean;
+            keyUrl?: string;
+            custom?: boolean;
+          };
+
+          const p = (x: Omit<Provider, "apiKey" | "enabled" | "needsKey"> & Partial<Provider>): Provider => ({
+            apiKey: "",
+            enabled: true,
+            needsKey: true,
+            ...x,
+          });
+
+          // SÄ±ra = deneme sÄ±rasÄ±. Ãœcretsizler Ã¶nde, Ã¼cretliler yedekte.
+          export const PRESETS: Provider[] = [
+            p({ id: "groq", name: "Groq (Ã¼cretsiz, Ã§ok hÄ±zlÄ±)", type: "openai", baseUrl: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b", keyUrl: "https://console.groq.com/keys" }),
+            p({ id: "gemini", name: "Google Gemini (Ã¼cretsiz)", type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-flash-latest", keyUrl: "https://aistudio.google.com/apikey" }),
+            p({ id: "cerebras", name: "Cerebras (Ã¼cretsiz)", type: "openai", baseUrl: "https://api.cerebras.ai/v1", model: "gpt-oss-120b", keyUrl: "https://cloud.cerebras.ai" }),
+            p({ id: "mistral", name: "Mistral (Ã¼cretsiz)", type: "openai", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-latest", keyUrl: "https://console.mistral.ai/api-keys" }),
+            p({ id: "openrouter", name: "OpenRouter (Ã¼cretsiz modeller)", type: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "openrouter/free", keyUrl: "https://openrouter.ai/keys" }),
+            p({ id: "github", name: "GitHub Models (Ã¼cretsiz)", type: "openai", baseUrl: "https://models.github.ai/inference", model: "openai/gpt-4.1-mini", keyUrl: "https://github.com/settings/tokens" }),
+            p({ id: "claude", name: "Claude (Anthropic, Ã¼cretli)", type: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-haiku-4-5", keyUrl: "https://console.anthropic.com/settings/keys" }),
+            p({ id: "openai", name: "ChatGPT / OpenAI (Ã¼cretli)", type: "openai", baseUrl: "https://api.openai.com/v1", model: "", keyUrl: "https://platform.openai.com/api-keys" }),
+            p({ id: "deepseek", name: "DeepSeek", type: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", keyUrl: "https://platform.deepseek.com/api_keys" }),
+            p({ id: "xai", name: "xAI Grok", type: "openai", baseUrl: "https://api.x.ai/v1", model: "", keyUrl: "https://console.x.ai" }),
+            p({ id: "together", name: "Together AI", type: "openai", baseUrl: "https://api.together.xyz/v1", model: "", keyUrl: "https://api.together.xyz/settings/api-keys" }),
+            p({ id: "nvidia", name: "NVIDIA NIM", type: "openai", baseUrl: "https://integrate.api.nvidia.com/v1", model: "", keyUrl: "https://build.nvidia.com" }),
+            p({ id: "ollama", name: "Ollama (kendi PC'n)", type: "openai", baseUrl: "http://192.168.1.10:11434/v1", model: "", enabled: false, needsKey: false }),
+          ];
+
+          // KayÄ±tlÄ± ayarlarÄ± korur; uygulama gÃ¼ncellenip yeni yapay zeka eklendiÄŸinde listeye kendiliÄŸinden ekler.
+          export function mergeWithPresets(saved: Provider[] | null): Provider[] {
+            if (!saved || !Array.isArray(saved)) return PRESETS.map((x) => ({ ...x }));
+            const ids = new Set(saved.map((s) => s.id));
+            const kept = saved.map((s) => {
+              const pre = PRESETS.find((x) => x.id === s.id);
+              if (!pre) return s;
+              return { ...pre, apiKey: s.apiKey ?? "", model: s.model ?? pre.model, enabled: s.enabled ?? true, baseUrl: pre.id === "ollama" ? s.baseUrl : pre.baseUrl };
+            });
+            return [...kept, ...PRESETS.filter((x) => !ids.has(x.id)).map((x) => ({ ...x }))];
+          }
+
+          export function isUsable(x: Provider): boolean {
+            return x.enabled && !!x.model.trim() && !!x.baseUrl.trim() && (!x.needsKey || !!x.apiKey.trim());
+          }
+          EOF
+
+      - name: Dosya src/core/brain.ts
+        working-directory: asena
+        run: |
+          mkdir -p "$(dirname src/core/brain.ts)"
+          cat > src/core/brain.ts <<'EOF'
+          import { Provider, isUsable } from "./providers";
+
+          export type Message = { role: "user" | "model"; text: string; local?: boolean; via?: string };
+
+          const SYSTEM = `Sen Asena'sÄ±n. Umut'un kiÅŸisel yapay zeka asistanÄ±sÄ±n. Iron Man'deki Jarvis gibi zeki, sakin, hafif esprili ve sadÄ±ksÄ±n.
+          Her zaman TÃ¼rkÃ§e konuÅŸ. CevaplarÄ±n sesli okunacak: kÄ±sa ve doÄŸal cÃ¼mleler kur.
+          Madde iÅŸareti, emoji, markdown ya da kod bloÄŸu kullanma. Umut detay isterse uzun anlat.`;
+
+          type Turn = { role: "user" | "assistant"; text: string };
+
+          function toTurns(history: Message[]): Turn[] {
+            const out: Turn[] = [];
+            for (const m of history.filter((x) => !x.local).slice(-20)) {
+              const role = m.role === "user" ? "user" : "assistant";
+              const last = out[out.length - 1];
+              if (last && last.role === role) last.text += "\n" + m.text;
+              else out.push({ role, text: m.text });
+            }
+            while (out.length && out[0].role !== "user") out.shift();
+            return out;
+          }
+
+          const base = (x: Provider) => x.baseUrl.trim().replace(/\/+$/, "");
+
+          async function http(url: string, init: RequestInit, ms = 45000): Promise<any> {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), ms);
+            try {
+              const res = await fetch(url, { ...init, signal: ctrl.signal });
+              const data: any = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                const msg = data?.error?.message || (typeof data?.error === "string" ? data.error : "") || data?.message || "";
+                throw new Error(`${res.status} ${msg}`.trim());
+              }
+              return data;
+            } catch (e: any) {
+              if (e?.name === "AbortError") throw new Error("zaman aÅŸÄ±mÄ±");
+              throw e;
+            } finally {
+              clearTimeout(timer);
+            }
+          }
+
+          function headers(x: Provider): Record<string, string> {
+            const key = x.apiKey.trim();
+            if (x.type === "anthropic") return { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" };
+            if (x.type === "gemini") return { "content-type": "application/json", "x-goog-api-key": key };
+            return key ? { "content-type": "application/json", Authorization: `Bearer ${key}` } : { "content-type": "application/json" };
+          }
+
+          async function callOne(x: Provider, turns: Turn[]): Promise<string> {
+            const model = x.model.trim();
+            if (x.type === "anthropic") {
+              const d = await http(`${base(x)}/messages`, {
+                method: "POST",
+                headers: headers(x),
+                body: JSON.stringify({ model, max_tokens: 1024, system: SYSTEM, messages: turns.map((t) => ({ role: t.role, content: t.text })) }),
+              });
+              return (d?.content ?? []).filter((b: any) => b?.type === "text").map((b: any) => b.text).join("").trim();
+            }
+            if (x.type === "gemini") {
+              const d = await http(`${base(x)}/models/${model}:generateContent`, {
+                method: "POST",
+                headers: headers(x),
+                body: JSON.stringify({
+                  system_instruction: { parts: [{ text: SYSTEM }] },
+                  contents: turns.map((t) => ({ role: t.role === "user" ? "user" : "model", parts: [{ text: t.text }] })),
+                }),
+              });
+              return (d?.candidates?.[0]?.content?.parts ?? []).map((q: any) => q?.text ?? "").join("").trim();
+            }
+            const d = await http(`${base(x)}/chat/completions`, {
+              method: "POST",
+              headers: headers(x),
+              body: JSON.stringify({ model, messages: [{ role: "system", content: SYSTEM }, ...turns.map((t) => ({ role: t.role, content: t.text }))] }),
+            });
+            const c = d?.choices?.[0]?.message?.content;
+            return (typeof c === "string" ? c : Array.isArray(c) ? c.map((q: any) => q?.text ?? "").join("") : "").trim();
+          }
+
+          // SÄ±rayla dener: biri hata verir ya da limiti dolarsa bir sonrakine geÃ§er.
+          export async function ask(history: Message[], providers: Provider[]): Promise<{ text: string; via: string }> {
+            const turns = toTurns(history);
+            const usable = providers.filter(isUsable);
+            if (!usable.length) throw new Error("Ayarlar'da en az bir yapay zekayÄ± aÃ§Ä±p anahtarÄ±nÄ± ve modelini gir.");
+            const errors: string[] = [];
+            for (const x of usable) {
+              try {
+                const text = await callOne(x, turns);
+                if (text) return { text, via: x.name };
+                errors.push(`${x.name}: boÅŸ cevap`);
+              } catch (e: any) {
+                errors.push(`${x.name}: ${e?.message ?? "hata"}`);
+              }
+            }
+            throw new Error("HiÃ§bir yapay zeka cevap vermedi.\n" + errors.join("\n"));
+          }
+
+          // SaÄŸlayÄ±cÄ±nÄ±n gÃ¼ncel model listesini Ã§eker; yeni Ã§Ä±kan modeller de burada gÃ¶rÃ¼nÃ¼r.
+          export async function listModels(x: Provider): Promise<string[]> {
+            let ids: string[] = [];
+            if (x.type === "gemini") {
+              const d = await http(`${base(x)}/models?pageSize=1000`, { headers: headers(x) }, 20000);
+              ids = (d?.models ?? [])
+                .filter((m: any) => (m?.supportedGenerationMethods ?? []).includes("generateContent"))
+                .map((m: any) => String(m.name).replace(/^models\//, ""));
+            } else {
+              const d = await http(`${base(x)}/models${x.type === "anthropic" ? "?limit=1000" : ""}`, { headers: headers(x) }, 20000);
+              const arr = Array.isArray(d) ? d : d?.data ?? d?.models ?? [];
+              ids = arr.map((m: any) => (typeof m === "string" ? m : m?.id ?? m?.name)).filter(Boolean);
+            }
+            return Array.from(new Set(ids)).sort();
+          }
+          EOF
+
+      - name: Dosya src/ui/Settings.tsx
+        working-directory: asena
+        run: |
+          mkdir -p "$(dirname src/ui/Settings.tsx)"
+          cat > src/ui/Settings.tsx <<'EOF'
+          import { useEffect, useState } from "react";
+          import { View, Text, TextInput, Pressable, ScrollView, StyleSheet, Switch, Linking, ActivityIndicator } from "react-native";
+          import * as Speech from "expo-speech";
+          import { Provider, ApiType, isUsable } from "../core/providers";
+          import { listModels } from "../core/brain";
+
+          type Props = {
+            providers: Provider[];
+            voice: string;
+            onSave: (providers: Provider[], voice: string) => void;
+            onClose: () => void;
+            speak: (text: string, voice: string) => void;
+          };
+
+          export default function Settings({ providers, voice, onSave, onClose, speak }: Props) {
+            const [list, setList] = useState<Provider[]>(providers.map((x) => ({ ...x })));
+            const [selVoice, setSelVoice] = useState(voice);
+            const [open, setOpen] = useState<string | null>(null);
+            const [voices, setVoices] = useState<Speech.Voice[]>([]);
+            const [models, setModels] = useState<Record<string, string[]>>({});
+            const [loading, setLoading] = useState<string | null>(null);
+            const [modelErr, setModelErr] = useState<Record<string, string>>({});
+
+            useEffect(() => {
+              Speech.getAvailableVoicesAsync().then((all) =>
+                setVoices(all.filter((v) => (v.language ?? "").toLowerCase().startsWith("tr")))
+              );
+            }, []);
+
+            const update = (id: string, patch: Partial<Provider>) =>
+              setList((l) => l.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+
+            const move = (i: number, d: number) =>
+              setList((l) => {
+                const j = i + d;
+                if (j < 0 || j >= l.length) return l;
+                const c = [...l];
+                [c[i], c[j]] = [c[j], c[i]];
+                return c;
+              });
+
+            async function fetchModels(x: Provider) {
+              setLoading(x.id);
+              setModelErr((e) => ({ ...e, [x.id]: "" }));
+              try {
+                const ids = await listModels(x);
+                setModels((m) => ({ ...m, [x.id]: ids }));
+                if (!ids.length) setModelErr((e) => ({ ...e, [x.id]: "Liste boÅŸ geldi, model adÄ±nÄ± elle yaz." }));
+              } catch (err: any) {
+                setModelErr((e) => ({ ...e, [x.id]: "Liste alÄ±namadÄ± (" + (err?.message ?? "hata") + "). Model adÄ±nÄ± elle yazabilirsin." }));
+              } finally {
+                setLoading(null);
+              }
+            }
+
+            function addCustom() {
+              const id = "custom-" + Date.now();
+              setList((l) => [...l, { id, name: "Yeni yapay zeka", type: "openai", baseUrl: "https://", apiKey: "", model: "", enabled: true, needsKey: true, custom: true }]);
+              setOpen(id);
+            }
+
+            return (
+              <ScrollView style={s.root} contentContainerStyle={{ padding: 20, paddingTop: 48, gap: 12 }}>
+                <View style={s.head}>
+                  <Text style={s.title}>Ayarlar</Text>
+                  <Pressable onPress={onClose}><Text style={s.link}>Kapat</Text></Pressable>
+                </View>
+
+                <Text style={s.info}>
+                  Asena yukarÄ±dan aÅŸaÄŸÄ± sÄ±rayla dener. Biri cevap vermezse ya da limiti dolarsa bir sonrakine geÃ§er. YeÅŸil nokta: kullanÄ±ma hazÄ±r.
+                </Text>
+
+                {list.map((x, i) => {
+                  const ready = isUsable(x);
+                  const isOpen = open === x.id;
+                  const filter = x.model.toLowerCase();
+                  const shown = (models[x.id] ?? []).filter((m) => !filter || m.toLowerCase().includes(filter)).slice(0, 40);
+                  return (
+                    <View key={x.id} style={s.card}>
+                      <View style={s.row}>
+                        <View style={[s.dot, { backgroundColor: ready ? "#22c55e" : "#475569" }]} />
+                        <Pressable style={{ flex: 1 }} onPress={() => setOpen(isOpen ? null : x.id)}>
+                          <Text style={s.name}>{x.name}</Text>
+                          <Text style={s.sub}>{x.model || "model seÃ§ilmedi"}</Text>
+                        </Pressable>
+                        <Pressable onPress={() => move(i, -1)} style={s.arrow}><Text style={s.text}>â†‘</Text></Pressable>
+                        <Pressable onPress={() => move(i, 1)} style={s.arrow}><Text style={s.text}>â†“</Text></Pressable>
+                        <Switch value={x.enabled} onValueChange={(v) => update(x.id, { enabled: v })} />
+                      </View>
+
+                      {isOpen && (
+                        <View style={{ gap: 8, marginTop: 10 }}>
+                          {x.custom && (
+                            <>
+                              <Text style={s.label}>Ad</Text>
+                              <TextInput style={s.input} value={x.name} onChangeText={(v) => update(x.id, { name: v })} />
+                              <Text style={s.label}>BaÄŸlantÄ± tÃ¼rÃ¼</Text>
+                              <View style={s.row}>
+                                {(["openai", "anthropic", "gemini"] as ApiType[]).map((t) => (
+                                  <Pressable key={t} onPress={() => update(x.id, { type: t })} style={[s.chip, x.type === t && s.chipOn]}>
+                                    <Text style={s.text}>{t === "openai" ? "OpenAI uyumlu" : t === "anthropic" ? "Anthropic" : "Gemini"}</Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+                              <View style={s.row}>
+                                <Text style={[s.label, { flex: 1 }]}>Anahtar gerekli</Text>
+                                <Switch value={x.needsKey} onValueChange={(v) => update(x.id, { needsKey: v })} />
+                              </View>
+                            </>
+                          )}
+
+                          {(x.custom || !x.needsKey) && (
+                            <>
+                              <Text style={s.label}>Adres (Base URL)</Text>
+                              <TextInput style={s.input} value={x.baseUrl} autoCapitalize="none" onChangeText={(v) => update(x.id, { baseUrl: v.trim() })} />
+                            </>
+                          )}
+
+                          {x.needsKey && (
+                            <>
+                              <Text style={s.label}>API anahtarÄ±</Text>
+                              <TextInput style={s.input} value={x.apiKey} secureTextEntry autoCapitalize="none" placeholder="anahtarÄ± yapÄ±ÅŸtÄ±r" placeholderTextColor="#64748b" onChangeText={(v) => update(x.id, { apiKey: v.trim() })} />
+                              {!!x.keyUrl && (
+                                <Pressable onPress={() => Linking.openURL(x.keyUrl!)}>
+                                  <Text style={s.link}>Anahtar almak iÃ§in dokun</Text>
+                                </Pressable>
+                              )}
+                            </>
+                          )}
+
+                          <Text style={s.label}>Model</Text>
+                          <TextInput style={s.in
